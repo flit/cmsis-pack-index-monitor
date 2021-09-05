@@ -53,7 +53,7 @@ class RequestError(Exception):
 class PackIndexMonitor:
     PIDX = "http://www.keil.com/pack/index.pidx"
 
-    VENDORS_TO_MONITOR = ("Keil", "NXP")
+    VENDORS_TO_MONITOR = ("Keil",)
 
     def __init__(self) -> None:
         pass
