@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
@@ -72,7 +73,6 @@ class PackIndexMonitor:
         if ts_iso is None:
             raise RuntimeError("Error: missing index timestamp!")
         ts = dateutil.parser.isoparse(ts_iso)
-        # print(f"Index timestamp: {ts}")
 
         # Get list of pdscs.
         pdscs = [
@@ -111,17 +111,22 @@ class PackIndexMonitor:
                 for pdsc in filtered_pdscs
             }
 
-            progress = tqdm(as_completed(futures_map), total=len(filtered_pdscs), unit="pack")
-            for future in progress:
+            if sys.stdout.isatty():
+                futures_iter = tqdm(as_completed(futures_map), total=len(filtered_pdscs), unit="pack")
+                msg_file = futures_iter
+            else:
+                futures_iter = futures_map
+                msg_file = sys.stdout
+
+            for future in futures_iter:
                 pdsc = futures_map[future]
                 pdsc_url = pdsc.get_pdsc_url()
                 response = future.result()
-                # response = requests.get(pdsc_url)
                 if response.status_code != 200:
                     failures.append(RequestFailureInfo(url=pdsc_url, status=response.status_code))
-                    tqdm.write(f"{colorama.Fore.RED}{pdsc_url}{colorama.Style.RESET_ALL}")
+                    msg_file.write(f"{colorama.Fore.RED}{pdsc_url}{colorama.Style.RESET_ALL}")
                 else:
-                    tqdm.write(f"{colorama.Fore.GREEN}{pdsc_url}{colorama.Style.RESET_ALL}")
+                    msg_file.write(f"{colorama.Fore.GREEN}{pdsc_url}{colorama.Style.RESET_ALL}")
 
         return failures
 
