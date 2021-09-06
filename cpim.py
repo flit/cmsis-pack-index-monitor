@@ -19,7 +19,7 @@ import sys
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 import requests
 from xml.etree import ElementTree
 from urllib.parse import urljoin
@@ -63,12 +63,12 @@ class RequestError(Exception):
 class PackIndexMonitor:
     PIDX = "http://www.keil.com/pack/index.pidx"
 
-    VENDORS_TO_MONITOR = ("Keil",)
-
     REQUEST_TIMEOUT_SECONDS = 30
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, vendors: Sequence[str], quiet: bool) -> None:
+        self._vendors = vendors
+        self._all_vendors = '*' in vendors
+        self._quiet = quiet
 
     def retrieve_index(self) -> Tuple[datetime, List[PdscInfo]]:
         try:
@@ -78,8 +78,11 @@ class PackIndexMonitor:
         except requests.exceptions.Timeout:
             raise RequestError(RequestFailureInfo(url=self.PIDX, cause=FailureCause.REQUEST_TIMEOUT))
 
-        print(f"Pack index response status: {idx_response.status_code}")
+        if not self._quiet:
+            print(f"Pack index response status: {idx_response.status_code}")
         if idx_response.status_code != 200:
+            if self._quiet:
+                print(f"Failed to retrieve pack index! Response status: {idx_response.status_code}")
             raise RequestError(RequestFailureInfo(
                     url=self.PIDX,
                     status=idx_response.status_code,
@@ -130,15 +133,20 @@ class PackIndexMonitor:
         except RequestError as err:
             return [err.args[0]]
 
-        print(f"Timestamp: {ts}")
-        print(f"{len(pdscs)} total packs")
+        if not self._quiet:
+            print(f"Timestamp: {ts}")
+            print(f"{len(pdscs)} total packs")
 
-        filtered_pdscs = [
-            p
-            for p in pdscs
-            if p.vendor in self.VENDORS_TO_MONITOR
-        ]
-        print(f"{len(filtered_pdscs)} monitored packs")
+        if self._all_vendors:
+            filtered_pdscs = pdscs
+        else:
+            filtered_pdscs = [
+                p
+                for p in pdscs
+                if p.vendor.casefold() in self._vendors
+            ]
+        if not self._quiet:
+            print(f"{len(filtered_pdscs)} monitored packs")
 
         failures: List[RequestFailureInfo] = []
 
@@ -172,22 +180,29 @@ class PackIndexMonitor:
                         ))
                     msg_file.write(f"{colorama.Fore.RED}{pdsc_url} "
                                    f"{colorama.Style.BRIGHT}[{response.status_code}]{colorama.Style.RESET_ALL}")
-                else:
+                elif not self._quiet:
                     msg_file.write(f"{colorama.Fore.GREEN}{pdsc_url}{colorama.Style.RESET_ALL}")
 
         return failures
 
 
 class PackIndexMonitorTool:
+    DEFAULT_VENDORS = ["Keil"]
+
     def __init__(self) -> None:
         self._parser = self._build_parser()
     
     def _build_parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser()
-        parser.add_argument('--interval', type=int, default=0,
+        parser.add_argument('-i', '--interval', type=int, default=0,
             help="Set to non-zero interval in seconds for repeated checks.")
-        parser.add_argument('--log', metavar='LOGFILE',
+        parser.add_argument('-l', '--log', metavar='LOGFILE',
             help="Path to log file. Defaults to no log.")
+        parser.add_argument('-v', '--vendors', nargs='+', action='extend', default=[],
+            help="Set of vendors for which packs should be checked. If '*' is included in the list, "
+                "then all packs will be checked. Default: " + ", ".join(self.DEFAULT_VENDORS))
+        parser.add_argument('-q', '--quiet', action='store_true',
+            help="Print only progress bar (if tty) and errors.")
 
         return parser
     
@@ -200,7 +215,12 @@ class PackIndexMonitorTool:
             else:
                 logfile = None
 
-            mon = PackIndexMonitor()
+            vendors = [
+                vendor.strip().casefold()
+                for vendor in (args.vendors or self.DEFAULT_VENDORS)
+                ]
+
+            mon = PackIndexMonitor(vendors, args.quiet)
 
             while True:
                 now = datetime.now()
