@@ -19,15 +19,16 @@ import sys
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Union
 import requests
-from xml.etree.ElementTree import XML
+from xml.etree import ElementTree
 from urllib.parse import urljoin
 import dateutil.parser
 from time import sleep
 import colorama
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum
 
 colorama.init()
 
@@ -42,10 +43,19 @@ class PdscInfo:
         prefix_url = self.url if self.url.endswith("/") else self.url + "/"
         return urljoin(prefix_url, f"{self.vendor}.{self.name}.pdsc")
 
+class FailureCause(Enum):
+    CONNECT_FAILED = 1
+    REQUEST_FAILED = 2
+    REQUEST_TIMEOUT = 3
+    INVALID_DATA = 4
+
 @dataclass
 class RequestFailureInfo:
     url: str
-    status: int
+    status: int = -1
+    cause: FailureCause = FailureCause.REQUEST_FAILED
+    response: Optional[requests.Response] = None
+    pdsc: Optional[PdscInfo] = None
 
 class RequestError(Exception):
     pass
@@ -55,24 +65,43 @@ class PackIndexMonitor:
 
     VENDORS_TO_MONITOR = ("Keil",)
 
+    REQUEST_TIMEOUT_SECONDS = 30
+
     def __init__(self) -> None:
         pass
 
     def retrieve_index(self) -> Tuple[datetime, List[PdscInfo]]:
-        idx_response = requests.get(self.PIDX)
-        print(f"Pack index response status: {idx_response.status_code}")
+        try:
+            idx_response = requests.get(self.PIDX, timeout=self.REQUEST_TIMEOUT_SECONDS)
+        except requests.exceptions.ConnectionError:
+            raise RequestError(RequestFailureInfo(url=self.PIDX, cause=FailureCause.CONNECT_FAILED))
+        except requests.exceptions.Timeout:
+            raise RequestError(RequestFailureInfo(url=self.PIDX, cause=FailureCause.REQUEST_TIMEOUT))
 
+        print(f"Pack index response status: {idx_response.status_code}")
         if idx_response.status_code != 200:
-            raise RequestError(RequestFailureInfo(url=self.PIDX, status=idx_response.status_code))
+            raise RequestError(RequestFailureInfo(
+                    url=self.PIDX,
+                    status=idx_response.status_code,
+                    response=idx_response,
+                    ))
 
         # Parse XML
-        idx = XML(idx_response.content)
+        try:
+            idx = ElementTree.XML(idx_response.content)
+        except ElementTree.ParseError:
+            raise RequestError(RequestFailureInfo(url=self.PIDX, cause=FailureCause.INVALID_DATA))
 
         # Get timestamp
         ts_iso = idx.findtext('timestamp')
         if ts_iso is None:
-            raise RuntimeError("Error: missing index timestamp!")
-        ts = dateutil.parser.isoparse(ts_iso)
+            print("Error: missing index timestamp!")
+            raise RequestError(RequestFailureInfo(url=self.PIDX, cause=FailureCause.INVALID_DATA))
+        
+        try:
+            ts = dateutil.parser.isoparse(ts_iso)
+        except dateutil.parser.ParserError:
+            raise RequestError(RequestFailureInfo(url=self.PIDX, cause=FailureCause.INVALID_DATA))
 
         # Get list of pdscs.
         pdscs = [
@@ -86,6 +115,14 @@ class PackIndexMonitor:
         ]
 
         return ts, pdscs
+
+    def retrieve_pdsc(self, pdsc: PdscInfo) -> Union[requests.Response, RequestFailureInfo]:
+        try:
+            return requests.get(pdsc.get_pdsc_url(), timeout=self.REQUEST_TIMEOUT_SECONDS)
+        except requests.exceptions.ConnectionError:
+            return RequestFailureInfo(url=pdsc.get_pdsc_url(), cause=FailureCause.CONNECT_FAILED)
+        except requests.exceptions.Timeout:
+            return RequestFailureInfo(url=pdsc.get_pdsc_url(), cause=FailureCause.REQUEST_TIMEOUT)
 
     def check_pdscs(self) -> List[RequestFailureInfo]:
         try:
@@ -103,7 +140,7 @@ class PackIndexMonitor:
         ]
         print(f"{len(filtered_pdscs)} monitored packs")
 
-        failures = []
+        failures: List[RequestFailureInfo] = []
 
         with ThreadPoolExecutor(max_workers=32) as executor:
             futures_map = {
@@ -122,14 +159,23 @@ class PackIndexMonitor:
                 pdsc = futures_map[future]
                 pdsc_url = pdsc.get_pdsc_url()
                 response = future.result()
-                if response.status_code != 200:
-                    failures.append(RequestFailureInfo(url=pdsc_url, status=response.status_code))
-                    msg_file.write(f"{colorama.Fore.RED}{pdsc_url}{colorama.Style.RESET_ALL}")
+                if isinstance(response, RequestFailureInfo):
+                    failures.append(response)
+                    msg_file.write(f"{colorama.Fore.RED}{pdsc_url}{colorama.Style.RESET_ALL} [{response.cause.name}]")
+                elif response.status_code != 200:
+                    failures.append(RequestFailureInfo(
+                        url=pdsc_url,
+                        status=response.status_code,
+                        cause=FailureCause.REQUEST_FAILED,
+                        response=response,
+                        pdsc=pdsc,
+                        ))
+                    msg_file.write(f"{colorama.Fore.RED}{pdsc_url} "
+                                   f"{colorama.Style.BRIGHT}[{response.status_code}]{colorama.Style.RESET_ALL}")
                 else:
                     msg_file.write(f"{colorama.Fore.GREEN}{pdsc_url}{colorama.Style.RESET_ALL}")
 
         return failures
-
 
 
 class PackIndexMonitorTool:
@@ -169,9 +215,11 @@ class PackIndexMonitorTool:
                         logfile.write(f"{now}: {len(failures)} failures\n")
 
                     for fail in failures:
-                        # print(f"    {fail.status} {fail.url}")
                         if logfile:
                             logfile.write(f"    {fail.status} {fail.url}\n")
+                            if fail.response is not None:
+                                for hk, hv in fail.response.headers.items():
+                                    logfile.write(f"        {hk}: {hv}\n")
                 else:
                     print(f"{now}: {colorama.Fore.GREEN}No failures!{colorama.Style.RESET_ALL}")
                     if logfile:
