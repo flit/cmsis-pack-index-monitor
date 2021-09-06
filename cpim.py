@@ -63,7 +63,7 @@ class RequestError(Exception):
 class PackIndexMonitor:
     PIDX = "http://www.keil.com/pack/index.pidx"
 
-    REQUEST_TIMEOUT_SECONDS = 30
+    REQUEST_TIMEOUT_SECONDS = 3
 
     def __init__(self, vendors: Sequence[str], quiet: bool, jobs: int) -> None:
         self._vendors = vendors
