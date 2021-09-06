@@ -65,10 +65,11 @@ class PackIndexMonitor:
 
     REQUEST_TIMEOUT_SECONDS = 30
 
-    def __init__(self, vendors: Sequence[str], quiet: bool) -> None:
+    def __init__(self, vendors: Sequence[str], quiet: bool, jobs: int) -> None:
         self._vendors = vendors
         self._all_vendors = '*' in vendors
         self._quiet = quiet
+        self._jobs = jobs
 
     def retrieve_index(self) -> Tuple[datetime, List[PdscInfo]]:
         try:
@@ -150,7 +151,7 @@ class PackIndexMonitor:
 
         failures: List[RequestFailureInfo] = []
 
-        with ThreadPoolExecutor(max_workers=32) as executor:
+        with ThreadPoolExecutor(max_workers=self._jobs) as executor:
             futures_map = {
                 executor.submit(requests.get, pdsc.get_pdsc_url()): pdsc
                 for pdsc in filtered_pdscs
@@ -203,6 +204,8 @@ class PackIndexMonitorTool:
                 "then all packs will be checked. Default: " + ", ".join(self.DEFAULT_VENDORS))
         parser.add_argument('-q', '--quiet', action='store_true',
             help="Print only progress bar (if tty) and errors.")
+        parser.add_argument('-j', '--jobs', type=int, default=32,
+            help="Set maximum number of concurrent requests. Default: 32")
 
         return parser
     
@@ -210,6 +213,10 @@ class PackIndexMonitorTool:
         args = self._parser.parse_args()
 
         try:
+            if args.jobs < 1 or args.jobs > 1000:
+                print("Jobs is out of range")
+                return
+
             if args.log:
                 logfile = open(args.log, 'a')
             else:
@@ -220,7 +227,7 @@ class PackIndexMonitorTool:
                 for vendor in (args.vendors or self.DEFAULT_VENDORS)
                 ]
 
-            mon = PackIndexMonitor(vendors, args.quiet)
+            mon = PackIndexMonitor(vendors, args.quiet, args.jobs)
 
             while True:
                 now = datetime.now()
